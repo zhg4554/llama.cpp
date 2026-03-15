@@ -1479,7 +1479,7 @@ static size_t ggml_backend_cann_buffer_type_get_alloc_size(ggml_backend_buffer_t
             size = std::max(size, new_size);
         } else {
             // For 910A or if V2 is not supported, manually calculate 512-byte aligned size
-            size_t elem_size = ggml_element_size(tensor->type);
+            size_t elem_size = ggml_type_size(tensor->type);
             size_t total_bytes = (size_t)tensor->ne[0] * tensor->ne[1] * elem_size;
             new_size = (total_bytes + 511) & ~511ULL;
             size = std::max(size, new_size);
