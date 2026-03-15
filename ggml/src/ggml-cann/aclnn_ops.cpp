@@ -1954,21 +1954,65 @@ static void ggml_cann_mat_mul_fp(ggml_backend_cann_context & ctx, ggml_tensor * 
         }
     }
 
-    acl_tensor_ptr acl_input_tensor = ggml_cann_create_tensor(input, bcast_input_ne, bcast_input_nb, n_dims);
-    int64_t        transpose_ne[]   = { bcast_weight_ne[1], bcast_weight_ne[0], bcast_weight_ne[2],
-                                        bcast_weight_ne[3], bcast_weight_ne[4], bcast_weight_ne[5] };
-    size_t         transpose_nb[]   = { bcast_weight_nb[1], bcast_weight_nb[0], bcast_weight_nb[2],
-                                        bcast_weight_nb[3], bcast_weight_nb[4], bcast_weight_nb[5] };
-    acl_tensor_ptr acl_weight_tensor;
+    // Determine if we need to pad tensors to multiples of 16 for 910A.
+    // Also avoid using NZ format on 910A due to limited operator support.
+    bool use_nz = parse_bool(get_env("GGML_CANN_WEIGHT_NZ").value_or("on")) && is_matmul_weight(weight) && !GGML_CANN_IS_910A;
 
-    // Only check env once.
-    static bool weight_to_nz = parse_bool(get_env("GGML_CANN_WEIGHT_NZ").value_or("on"));
-    if (weight_to_nz && is_matmul_weight(weight)) {
-        acl_weight_tensor = ggml_cann_create_tensor(weight, transpose_ne, transpose_nb, n_dims, ACL_FORMAT_FRACTAL_NZ);
+    // If dst overlaps with input/weight, force an intermediate buffer to avoid driver rejections.
+    auto overlaps = [](const void *a, size_t a_size, const void *b, size_t b_size) {
+        uintptr_t a0 = (uintptr_t) a;
+        uintptr_t a1 = a0 + a_size;
+        uintptr_t b0 = (uintptr_t) b;
+        uintptr_t b1 = b0 + b_size;
+        return (a0 < b1 && b0 < a1);
+    };
+
+    size_t input_size  = ggml_nbytes(input);
+    size_t weight_size = ggml_nbytes(weight);
+    size_t dst_size    = ggml_nbytes(dst);
+    bool   force_dst_copy = overlaps(dst->data, dst_size, input->data, input_size) ||
+                             overlaps(dst->data, dst_size, weight->data, weight_size);
+
+    std::vector<uint8_t> input_buf;
+    std::vector<uint8_t> weight_buf;
+    std::vector<uint8_t> dst_buf;
+
+    int64_t  input_ne_p[GGML_MAX_DIMS];
+    size_t   input_nb_p[GGML_MAX_DIMS];
+    void *   input_data = nullptr;
+    ggml_cann_prepare_tensor_for_npu(input, bcast_input_ne, bcast_input_nb, n_dims, false, input_buf, input_ne_p,
+                                     input_nb_p, &input_data);
+
+    int64_t  weight_ne_p[GGML_MAX_DIMS];
+    size_t   weight_nb_p[GGML_MAX_DIMS];
+    void *   weight_data = nullptr;
+    ggml_cann_prepare_tensor_for_npu(weight, transpose_ne, transpose_nb, n_dims, false, weight_buf, weight_ne_p,
+                                     weight_nb_p, &weight_data);
+
+    int64_t  dst_ne_p[GGML_MAX_DIMS];
+    size_t   dst_nb_p[GGML_MAX_DIMS];
+    void *   dst_data = nullptr;
+    ggml_cann_prepare_tensor_for_npu(dst, bcast_dst_ne, bcast_dst_nb, n_dims, force_dst_copy, dst_buf, dst_ne_p,
+                                     dst_nb_p, &dst_data);
+
+    acl_tensor_ptr acl_input_tensor = ggml_cann_create_tensor(input_data, ggml_cann_type_mapping(input->type),
+                                                              ggml_type_size(input->type), input_ne_p, input_nb_p,
+                                                              n_dims, ACL_FORMAT_ND);
+
+    acl_tensor_ptr acl_weight_tensor;
+    if (use_nz) {
+        acl_weight_tensor = ggml_cann_create_tensor(weight_data, ggml_cann_type_mapping(weight->type),
+                                                    ggml_type_size(weight->type), weight_ne_p, weight_nb_p,
+                                                    n_dims, ACL_FORMAT_FRACTAL_NZ);
     } else {
-        acl_weight_tensor = ggml_cann_create_tensor(weight, transpose_ne, transpose_nb, n_dims, ACL_FORMAT_ND);
+        acl_weight_tensor = ggml_cann_create_tensor(weight_data, ggml_cann_type_mapping(weight->type),
+                                                    ggml_type_size(weight->type), weight_ne_p, weight_nb_p,
+                                                    n_dims, ACL_FORMAT_ND);
     }
-    acl_tensor_ptr acl_dst = ggml_cann_create_tensor(dst, bcast_dst_ne, bcast_dst_nb, n_dims);
+
+    acl_tensor_ptr acl_dst = ggml_cann_create_tensor(dst_data, ggml_cann_type_mapping(dst->type),
+                                                    ggml_type_size(dst->type), dst_ne_p, dst_nb_p, n_dims,
+                                                    ACL_FORMAT_ND);
 
     switch (n_dims) {
         case 2:
@@ -2139,6 +2183,93 @@ static void ggml_cann_mul_mat_quant(ggml_backend_cann_context & ctx, ggml_tensor
     }
 }
 
+static bool ggml_cann_prepare_tensor_for_npu(const ggml_tensor * src,
+                                               const int64_t *     ne,
+                                               const size_t *      nb,
+                                               int64_t             dims,
+                                               bool                force_copy,
+                                               std::vector<uint8_t> & buf,
+                                               int64_t *           out_ne,
+                                               size_t *            out_nb,
+                                               void **             out_data) {
+    // Determine if padding is required for 16-byte alignment on 910A.
+    int64_t pad0 = ne[0];
+    int64_t pad1 = ne[1];
+    bool need_pad = false;
+    if (GGML_CANN_IS_910A) {
+        pad0 = (ne[0] + 15) & ~15LL;
+        pad1 = (ne[1] + 15) & ~15LL;
+        need_pad = (pad0 != ne[0] || pad1 != ne[1]);
+    }
+
+    if (!need_pad && !force_copy) {
+        // No changes needed.
+        memcpy(out_ne, ne, dims * sizeof(int64_t));
+        memcpy(out_nb, nb, dims * sizeof(size_t));
+        *out_data = const_cast<void *>(src->data);
+        return true;
+    }
+
+    // Workaround: pad/make a contiguous copy for NPU requirements.
+    const size_t elem_size = ggml_type_size(src->type);
+
+    int64_t new_ne[GGML_MAX_DIMS];
+    size_t  new_nb[GGML_MAX_DIMS];
+
+    memcpy(new_ne, ne, dims * sizeof(int64_t));
+    new_ne[0] = pad0;
+    new_ne[1] = pad1;
+
+    new_nb[0] = elem_size;
+    for (int i = 1; i < dims; ++i) {
+        new_nb[i] = new_nb[i - 1] * new_ne[i - 1];
+    }
+
+    int64_t total_elems = 1;
+    for (int i = 0; i < dims; ++i) {
+        total_elems *= new_ne[i];
+    }
+
+    buf.assign((size_t)total_elems * elem_size, 0);
+
+    const uint8_t * src_data = (const uint8_t *) src->data;
+    uint8_t *       dst_data = buf.data();
+
+    if (dims == 2) {
+        for (int64_t j = 0; j < ne[1]; ++j) {
+            for (int64_t i = 0; i < ne[0]; ++i) {
+                const size_t src_off = (size_t)i * nb[0] + (size_t)j * nb[1];
+                const size_t dst_off = (size_t)i * new_nb[0] + (size_t)j * new_nb[1];
+                memcpy(dst_data + dst_off, src_data + src_off, elem_size);
+            }
+        }
+    } else if (dims == 3) {
+        for (int64_t k = 0; k < ne[2]; ++k) {
+            for (int64_t j = 0; j < ne[1]; ++j) {
+                for (int64_t i = 0; i < ne[0]; ++i) {
+                    const size_t src_off = (size_t)i * nb[0] + (size_t)j * nb[1] + (size_t)k * nb[2];
+                    const size_t dst_off = (size_t)i * new_nb[0] + (size_t)j * new_nb[1] + (size_t)k * new_nb[2];
+                    memcpy(dst_data + dst_off, src_data + src_off, elem_size);
+                }
+            }
+        }
+    } else {
+        // For dims > 3, no padding is applied.
+        memcpy(out_ne, ne, dims * sizeof(int64_t));
+        memcpy(out_nb, nb, dims * sizeof(size_t));
+        *out_data = const_cast<void *>(src->data);
+        return true;
+    }
+
+    memcpy(out_ne, new_ne, dims * sizeof(int64_t));
+    memcpy(out_nb, new_nb, dims * sizeof(size_t));
+    *out_data = buf.data();
+
+    return true;
+}
+
+bool ggml_cann_try_matmul_fallback(ggml_backend_cann_context & ctx, ggml_tensor * dst);
+
 void ggml_cann_mul_mat(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
     const enum ggml_type type = dst->src[0]->type;
     switch (type) {
@@ -2148,11 +2279,26 @@ void ggml_cann_mul_mat(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
             break;
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
+            if (GGML_CANN_IS_910A) {
+                // Ascend 910A does not support the V2 quantized batch matmul operator.
+                // Fall back to CPU backend.
+                throw std::runtime_error("910A does not support WeightQuantBatchMatmulV2");
+            }
             ggml_cann_mul_mat_quant(ctx, dst, type);
             break;
         default:
             GGML_ABORT("Unsupported type for mul_mat");
             break;
+    }
+}
+
+bool ggml_cann_try_matmul_fallback(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
+    try {
+        ggml_cann_mul_mat(ctx, dst);
+        return true;
+    } catch (const std::runtime_error &) {
+        // Let caller fall back to CPU backend
+        return false;
     }
 }
 
@@ -3388,6 +3534,11 @@ void ggml_cann_flash_attn_ext(ggml_backend_cann_context & ctx, ggml_tensor * dst
                 ggml_cann_create_tensor(out_f16_buffer, faDataType, faElemSize, out_f16_ne, out_f16_nb, GGML_MAX_DIMS);
         } else {
             fa_dst_tensor = ggml_cann_create_tensor(dst);
+        }
+
+        if (GGML_CANN_IS_910A) {
+            // Ascend 910A does not support the V2 fused attention operator.
+            throw std::runtime_error("910A does not support FusedInferAttentionScoreV2");
         }
 
         GGML_CANN_CALL_ACLNN_OP(ctx, FusedInferAttentionScoreV2, acl_q_tensor.get(), acl_k_tensor_list.get(),

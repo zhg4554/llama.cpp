@@ -517,6 +517,8 @@ void ggml_cann_set_rows(ggml_backend_cann_context & ctx, ggml_tensor * dst);
  * @param dst The destination tensor for storing the result of the matrix
  *            multiplication. dst->op is `GGML_OP_MUL_MAT`.
  */
+bool ggml_cann_try_matmul_fallback(ggml_backend_cann_context & ctx, ggml_tensor * dst);
+
 void ggml_cann_mul_mat(ggml_backend_cann_context & ctx, ggml_tensor * dst);
 
 /**

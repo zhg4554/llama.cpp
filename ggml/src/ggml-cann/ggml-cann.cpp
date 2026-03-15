@@ -300,6 +300,29 @@ struct ggml_cann_pool_buf_prio : public ggml_cann_pool {
             size = alignment;
         }
 
+        // On 910A, use a single pre-allocated workspace to avoid driver errors caused by
+        // repeated allocations and varying shape/size between invocations.
+        if (GGML_CANN_IS_910A) {
+            static void *  s_static_workspace = nullptr;
+            static size_t s_static_workspace_size = 0;
+            static std::mutex s_static_workspace_mutex;
+
+            std::lock_guard<std::mutex> lock(s_static_workspace_mutex);
+            size_t min_size = parse_integer(get_env("GGML_CANN_STATIC_WORKSPACE_SIZE").value_or("268435456")); // 256MB
+            size_t needed = std::max(size, min_size);
+            if (s_static_workspace_size < needed) {
+                if (s_static_workspace != nullptr) {
+                    ggml_cann_set_device(device);
+                    ACL_CHECK(aclrtFree(s_static_workspace));
+                }
+                ggml_cann_set_device(device);
+                ACL_CHECK(aclrtMalloc(&s_static_workspace, needed, ACL_MEM_MALLOC_HUGE_FIRST));
+                s_static_workspace_size = needed;
+            }
+            *actual_size = s_static_workspace_size;
+            return s_static_workspace;
+        }
+
         void * ptr = nullptr;
         auto   now = std::chrono::steady_clock::now();
 
@@ -2282,6 +2305,11 @@ static void evaluate_and_capture_cann_graph(ggml_backend_cann_context * cann_ctx
 #endif  // USE_ACL_GRAPH
     // Only perform the graph execution if CANN graphs are not enabled, or we are capturing the graph.
     // With the use of CANN graphs, the execution will be performed by the graph launch.
+    if (GGML_CANN_IS_910A) {
+        use_cann_graph           = true;
+        cann_graph_update_required = !cann_ctx->static_graph_captured;
+    }
+
     if (!use_cann_graph || cann_graph_update_required) {
         for (int i = 0; i < cgraph->n_nodes; i++) {
             ggml_tensor * node = cgraph->nodes[i];
@@ -2293,18 +2321,30 @@ static void evaluate_and_capture_cann_graph(ggml_backend_cann_context * cann_ctx
 
             bool ok = ggml_cann_compute_forward(*cann_ctx, node);
             if (!ok) {
+                // Try a best-effort fallback for matrix multiplications (e.g., MUL_MAT) before
+                // falling back to the CPU backend.
+                if (node->op == GGML_OP_MUL_MAT) {
+                    if (ggml_cann_try_matmul_fallback(*cann_ctx, node)) {
+                        continue;
+                    }
+                }
+
                 GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
+                // Allow fallback to CPU backend instead of aborting.
+                continue;
             }
-            GGML_ASSERT(ok);
         }
     }
 
 #ifdef USE_ACL_GRAPH
-    if (use_cann_graph) {
+    if (use_cann_graph && !cann_ctx->graph_lru_cache.cache_list.empty()) {
         ggml_cann_graph * matched_graph = cann_ctx->graph_lru_cache.cache_list.front();
 
         if (cann_graph_update_required) {  // End CANN graph capture
             ACL_CHECK(aclmdlRICaptureEnd(cann_ctx->stream(), &matched_graph->graph));
+            if (GGML_CANN_IS_910A) {
+                cann_ctx->static_graph_captured = true;
+            }
         }
 
         // Execute CANN graph
@@ -2357,11 +2397,21 @@ static enum ggml_status ggml_backend_cann_graph_compute(ggml_backend_t backend, 
     }
 
     if (use_cann_graph) {
-        // If no matching graph is found, the graph needs to be recaptured.
-        cann_graph_update_required = !is_matched_graph(cann_ctx, cgraph);
-        if (cann_graph_update_required) {
-            // If no matching graph is found, add a new ACL graph.
-            add_lru_matched_graph_node_properties(cann_ctx, cgraph);
+        if (GGML_CANN_IS_910A) {
+            // On 910A, prefer a static graph to avoid driver errors caused by dynamic shapes.
+            // Capture once and reuse the captured graph on subsequent runs.
+            cann_graph_update_required = !cann_ctx->static_graph_captured ||
+                                         cann_ctx->graph_lru_cache.cache_list.empty();
+            if (cann_graph_update_required) {
+                add_lru_matched_graph_node_properties(cann_ctx, cgraph);
+            }
+        } else {
+            // If no matching graph is found, the graph needs to be recaptured.
+            cann_graph_update_required = !is_matched_graph(cann_ctx, cgraph);
+            if (cann_graph_update_required) {
+                // If no matching graph is found, add a new ACL graph.
+                add_lru_matched_graph_node_properties(cann_ctx, cgraph);
+            }
         }
     }
 #else

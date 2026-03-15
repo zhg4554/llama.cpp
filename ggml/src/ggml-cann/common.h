@@ -111,6 +111,8 @@ const ggml_cann_device_info & ggml_cann_info();
 
 bool ggml_cann_is_910a();
 
+#define GGML_CANN_IS_910A (ggml_cann_is_910a())
+
 void    ggml_cann_set_device(int32_t device);
 int32_t ggml_cann_get_device();
 
@@ -422,6 +424,7 @@ struct ggml_backend_cann_context {
     /// Cached CANN ACL graph used for executing the current ggml computation graph.
     ggml_cann_graph_lru_cache graph_lru_cache;
     bool                      acl_graph_mode = true;
+    bool                      static_graph_captured = false;
 #endif
     bool                   async_mode;
     // Rope Cache
@@ -442,6 +445,12 @@ struct ggml_backend_cann_context {
 
 #ifdef USE_ACL_GRAPH
         acl_graph_mode = parse_bool(get_env("GGML_CANN_ACL_GRAPH").value_or("on"));
+        if (ggml_cann_is_910a()) {
+            // Use a static graph mode on 910A to avoid failures due to dynamic shape dispatch.
+            acl_graph_mode = true;
+            graph_lru_cache.capacity = 1;
+            static_graph_captured = false;
+        }
         GGML_LOG_INFO("%s: device %d execution mode is %s (%s)\n", __func__, device, acl_graph_mode ? "GRAPH" : "EAGER",
                       acl_graph_mode ? "acl graph enabled" : "acl graph disabled");
 #endif
