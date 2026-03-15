@@ -75,6 +75,14 @@
 
 #define ACL_CHECK(stmt) ACL_CHECK_GEN(stmt, 0, aclGetRecentErrMsg)
 
+#define ACL_CHECK_TRY(stmt)                                                   \
+    do {                                                                      \
+        int err_code = (stmt);                                                \
+        if (err_code != 0) {                                                  \
+            throw std::runtime_error(std::string("CANN error: ") + aclGetRecentErrMsg()); \
+        }                                                                     \
+    } while (0);
+
 /**
  * @brief Contains information about CANN devices.
  */
@@ -93,12 +101,15 @@ struct ggml_cann_device_info {
         bool   vmm;             /**< Virtual memory support.               */
         size_t vmm_granularity; /**< Granularity of virtual memory.        */
         size_t total_vram;      /**< Total video RAM available on the device. */
+        std::string soc_name;   /**< SOC name, e.g., "Ascend910B".         */
     };
 
     cann_device_info devices[GGML_CANN_MAX_DEVICES] = {}; /**< Array of CANN device information. */
 };
 
 const ggml_cann_device_info & ggml_cann_info();
+
+bool ggml_cann_is_910a();
 
 void    ggml_cann_set_device(int32_t device);
 int32_t ggml_cann_get_device();

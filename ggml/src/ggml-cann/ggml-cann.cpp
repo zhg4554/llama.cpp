@@ -179,6 +179,10 @@ static ggml_cann_device_info ggml_cann_init() {
         size_t free, total;
         ggml_backend_cann_get_device_memory(id, &free, &total);
         info.devices[id].total_vram = free;
+
+        // Get SOC name
+        ggml_cann_set_device(id);
+        info.devices[id].soc_name = aclrtGetSocName();
     }
 
     // TODO: add more device info later.
@@ -197,6 +201,13 @@ static ggml_cann_device_info ggml_cann_init() {
 const ggml_cann_device_info & ggml_cann_info() {
     static ggml_cann_device_info info = ggml_cann_init();
     return info;
+}
+
+bool ggml_cann_is_910a() {
+    const auto & info = ggml_cann_info();
+    if (info.device_count == 0) return false;
+    // Check the first device, assuming all devices are the same
+    return info.devices[0].soc_name.find("910A") != std::string::npos;
 }
 
 //#define DEBUG_CANN_MALLOC
@@ -1462,9 +1473,17 @@ static size_t ggml_backend_cann_buffer_type_get_alloc_size(ggml_backend_buffer_t
         GGML_ASSERT(tensor->ne[3] == 1);
         const aclIntArray * acl_shape = aclCreateIntArray(shape, 2);
         size_t              new_size;
-        ACL_CHECK(aclnnCalculateMatmulWeightSizeV2(acl_shape, ggml_cann_type_mapping(tensor->type), &new_size));
+        aclError err = aclnnCalculateMatmulWeightSizeV2(acl_shape, ggml_cann_type_mapping(tensor->type), &new_size);
         ACL_CHECK(aclDestroyIntArray(acl_shape));
-        size = std::max(size, new_size);
+        if (err == ACL_SUCCESS) {
+            size = std::max(size, new_size);
+        } else {
+            // For 910A or if V2 is not supported, manually calculate 512-byte aligned size
+            size_t elem_size = ggml_element_size(tensor->type);
+            size_t total_bytes = (size_t)tensor->ne[0] * tensor->ne[1] * elem_size;
+            new_size = (total_bytes + 511) & ~511ULL;
+            size = std::max(size, new_size);
+        }
     }
 
     return size;
@@ -1661,7 +1680,8 @@ ggml_backend_buffer_type_t ggml_backend_cann_host_buffer_type() {
  * @return true if the computation was successful; false otherwise.
  */
 static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct ggml_tensor * dst) {
-    switch (dst->op) {
+    try {
+        switch (dst->op) {
         case GGML_OP_REPEAT:
             ggml_cann_repeat(ctx, dst);
             break;
@@ -1709,7 +1729,11 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
                 case GGML_UNARY_OP_GELU_QUICK:
                     {
                         auto lambda = [](ggml_backend_cann_context & ctx, aclTensor * acl_src, aclTensor * acl_dst) {
-                            GGML_CANN_CALL_ACLNN_OP(ctx, GeluV2, acl_src, 0, acl_dst);
+                            if (ggml_cann_is_910a()) {
+                                GGML_CANN_CALL_ACLNN_OP(ctx, Gelu, acl_src, acl_dst);
+                            } else {
+                                GGML_CANN_CALL_ACLNN_OP(ctx, GeluV2, acl_src, 0, acl_dst);
+                            }
                         };
                         ggml_cann_op_unary(lambda, ctx, dst);
                     }
@@ -1894,6 +1918,9 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
     }
 
     return true;
+    } catch (const std::runtime_error &) {
+        return false;
+    }
 }
 
 // backend
