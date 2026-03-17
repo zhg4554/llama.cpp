@@ -1986,7 +1986,7 @@ static void ggml_cann_mat_mul_fp(ggml_backend_cann_context & ctx, ggml_tensor * 
     int64_t  weight_ne_p[GGML_MAX_DIMS];
     size_t   weight_nb_p[GGML_MAX_DIMS];
     void *   weight_data = nullptr;
-    ggml_cann_prepare_tensor_for_npu(weight, transpose_ne, transpose_nb, n_dims, false, weight_buf, weight_ne_p,
+    ggml_cann_prepare_tensor_for_npu(weight, bcast_weight_ne, bcast_weight_nb, n_dims, false, weight_buf, weight_ne_p,
                                      weight_nb_p, &weight_data);
 
     int64_t  dst_ne_p[GGML_MAX_DIMS];

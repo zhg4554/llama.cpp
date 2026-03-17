@@ -2302,13 +2302,13 @@ static void evaluate_and_capture_cann_graph(ggml_backend_cann_context * cann_ctx
     if (use_cann_graph && cann_graph_update_required) {  // Begin CANN graph capture
         ACL_CHECK(aclmdlRICaptureBegin(cann_ctx->stream(), ACL_MODEL_RI_CAPTURE_MODE_GLOBAL));
     }
-#endif  // USE_ACL_GRAPH
     // Only perform the graph execution if CANN graphs are not enabled, or we are capturing the graph.
     // With the use of CANN graphs, the execution will be performed by the graph launch.
     if (GGML_CANN_IS_910A) {
         use_cann_graph           = true;
         cann_graph_update_required = !cann_ctx->static_graph_captured;
     }
+#endif  // USE_ACL_GRAPH
 
     if (!use_cann_graph || cann_graph_update_required) {
         for (int i = 0; i < cgraph->n_nodes; i++) {

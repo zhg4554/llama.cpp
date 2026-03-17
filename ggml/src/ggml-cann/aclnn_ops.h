@@ -1147,3 +1147,27 @@ void ggml_cann_op_unary_gated(std::function<void(ggml_backend_cann_context &, ac
  * @see GGML_CANN_CALL_ACLNN_OP for CANN operator invocation
  */
 void ggml_cann_out_prod(ggml_backend_cann_context & ctx, ggml_tensor * dst);
+
+/**
+ * @brief Prepares a tensor for NPU execution with padding and alignment.
+ *
+ * @param src      The source ggml tensor.
+ * @param ne       The shape dimensions to use.
+ * @param nb       The stride information.
+ * @param dims     Number of dimensions.
+ * @param force_copy Whether to force copying the tensor data.
+ * @param buf      Buffer for storing padded/copied data if needed.
+ * @param out_ne   Output shape dimensions.
+ * @param out_nb   Output stride information.
+ * @param out_data Output data pointer.
+ * @return true if no changes were made, false otherwise.
+ */
+bool ggml_cann_prepare_tensor_for_npu(const ggml_tensor * src,
+                                      const int64_t *     ne,
+                                      const size_t *      nb,
+                                      int64_t             dims,
+                                      bool                force_copy,
+                                      std::vector<uint8_t> & buf,
+                                      int64_t *           out_ne,
+                                      size_t *            out_nb,
+                                      void **             out_data);
