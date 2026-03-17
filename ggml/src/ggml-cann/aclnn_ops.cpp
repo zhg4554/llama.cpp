@@ -1925,6 +1925,17 @@ static void aclnn_repeat_interleave(ggml_backend_cann_context & ctx,
     GGML_CANN_CALL_ACLNN_OP(ctx, RepeatInterleaveIntWithDim, acl_src, repeats, dim, output_size, acl_dst);
 }
 
+// Forward declaration of static helper function
+static bool ggml_cann_prepare_tensor_for_npu(const ggml_tensor * src,
+                                             const int64_t *     ne,
+                                             const size_t *      nb,
+                                             int64_t             dims,
+                                             bool                force_copy,
+                                             std::vector<uint8_t> & buf,
+                                             int64_t *           out_ne,
+                                             size_t *            out_nb,
+                                             void **             out_data);
+
 /**
  * @brief Performs matrix multiplication with floating-point precision on
  * tensors using the CANN backend.
