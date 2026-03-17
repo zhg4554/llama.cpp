@@ -2698,6 +2698,10 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
                 // FA not support on 310p device
                 return false;
 #endif
+                // Ascend 910A does not support FLASH_ATTN_EXT operation
+                if (GGML_CANN_IS_910A) {
+                    return false;
+                }
                 // derived from [ggml-cuda.cu]
                 if (op->src[1]->type != GGML_TYPE_F16 || op->src[2]->type != GGML_TYPE_F16) {
                     return false;
