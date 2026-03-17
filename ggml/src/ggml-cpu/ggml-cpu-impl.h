@@ -292,9 +292,11 @@ inline static uint8x16_t ggml_vqtbl1q_u8(uint8x16_t a, uint8x16_t b) {
 #define ggml_int8x16x4_t  int8x16x4_t
 
 // Some toolchains (especially older ARM/LLVM versions) may not provide the
-// "x2"/"x4" NEON intrinsics. Provide portable fallbacks when missing.
-#ifndef vld1q_s16_x2
-static inline int16x8x2_t vld1q_s16_x2(const int16_t *ptr) {
+// "x2"/"x4" NEON intrinsics. Modern GCC/Clang versions (15.2.0+) provide these
+// intrinsics natively, so fallbacks are typically not needed.
+// Only define fallbacks for very old compilers that truly lack them.
+#if 0  // Disabled - modern compilers provide these intrinsics natively
+static inline __attribute__((gnu_inline)) int16x8x2_t vld1q_s16_x2(const int16_t *ptr) {
     int16x8x2_t r;
     r.val[0] = vld1q_s16(ptr);
     r.val[1] = vld1q_s16(ptr + 8);
@@ -302,8 +304,8 @@ static inline int16x8x2_t vld1q_s16_x2(const int16_t *ptr) {
 }
 #endif
 
-#ifndef vld1q_u8_x2
-static inline uint8x16x2_t vld1q_u8_x2(const uint8_t *ptr) {
+#if 0  // Disabled - modern compilers provide these intrinsics natively
+static inline __attribute__((gnu_inline)) uint8x16x2_t vld1q_u8_x2(const uint8_t *ptr) {
     uint8x16x2_t r;
     r.val[0] = vld1q_u8(ptr);
     r.val[1] = vld1q_u8(ptr + 16);
@@ -311,8 +313,8 @@ static inline uint8x16x2_t vld1q_u8_x2(const uint8_t *ptr) {
 }
 #endif
 
-#ifndef vld1q_u8_x4
-static inline uint8x16x4_t vld1q_u8_x4(const uint8_t *ptr) {
+#if 0  // Disabled - modern compilers provide these intrinsics natively
+static inline __attribute__((gnu_inline)) uint8x16x4_t vld1q_u8_x4(const uint8_t *ptr) {
     uint8x16x4_t r;
     r.val[0] = vld1q_u8(ptr);
     r.val[1] = vld1q_u8(ptr + 16);
@@ -322,8 +324,8 @@ static inline uint8x16x4_t vld1q_u8_x4(const uint8_t *ptr) {
 }
 #endif
 
-#ifndef vld1q_s8_x2
-static inline int8x16x2_t vld1q_s8_x2(const int8_t *ptr) {
+#if 0  // Disabled - modern compilers provide these intrinsics natively
+static inline __attribute__((gnu_inline)) int8x16x2_t vld1q_s8_x2(const int8_t *ptr) {
     int8x16x2_t r;
     r.val[0] = vld1q_s8(ptr);
     r.val[1] = vld1q_s8(ptr + 16);
@@ -331,8 +333,8 @@ static inline int8x16x2_t vld1q_s8_x2(const int8_t *ptr) {
 }
 #endif
 
-#ifndef vld1q_s8_x4
-static inline int8x16x4_t vld1q_s8_x4(const int8_t *ptr) {
+#if 0  // Disabled - modern compilers provide these intrinsics natively
+static inline __attribute__((gnu_inline)) int8x16x4_t vld1q_s8_x4(const int8_t *ptr) {
     int8x16x4_t r;
     r.val[0] = vld1q_s8(ptr);
     r.val[1] = vld1q_s8(ptr + 16);
