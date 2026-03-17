@@ -2471,6 +2471,10 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
             break;
         case GGML_OP_MUL_MAT:
             {
+                // Ascend 910A has limited support for matrix multiplication operations
+                if (GGML_CANN_IS_910A) {
+                    return false;
+                }
                 switch (op->src[0]->type) {
                     case GGML_TYPE_F16:
                     case GGML_TYPE_F32:
@@ -2551,6 +2555,10 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
             }
         case GGML_OP_ROPE:
             {
+                // Ascend 910A does not support ROPE operation
+                if (GGML_CANN_IS_910A) {
+                    return false;
+                }
                 // TODO: with ops-test v == 1
                 // TODO: n_dims <= ne0
                 if (op->src[0]->ne[0] != op->op_params[1]) {
@@ -2665,6 +2673,10 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
                 // FA not support on 310p device
                 return false;
 #endif
+                // Ascend 910A does not support FLASH_ATTN_EXT operation
+                if (GGML_CANN_IS_910A) {
+                    return false;
+                }
                 // derived from [ggml-cuda.cu]
                 if (op->src[1]->type != GGML_TYPE_F16 || op->src[2]->type != GGML_TYPE_F16) {
                     return false;
