@@ -3024,8 +3024,9 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                 {
                     // Get workspace size first
                     size_t workspace_size = 0;
-                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmbGetWorkspaceSize, acl_src.get(), acl_cos_reshape_tensor.get(),
-                                            acl_sin_reshape_tensor.get(), acl_mode, &workspace_size);
+                    aclOpExecutor * executor;
+                    ACL_CHECK(aclnnApplyRotaryPosEmbGetWorkspaceSize(acl_src.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), nullptr, acl_mode, &workspace_size, &executor));
                     
                     // Allocate workspace if needed
                     void* workspace = nullptr;
@@ -3036,8 +3037,9 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                     }
                     
                     // Execute the operation
-                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmb, acl_src.get(), acl_cos_reshape_tensor.get(),
-                                            acl_sin_reshape_tensor.get(), acl_mode, workspace, workspace_size, acl_dst.get());
+                    ACL_CHECK(aclnnApplyRotaryPosEmb(workspace, workspace_size, executor, ctx.stream(),
+                                            acl_src.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), nullptr, acl_mode, acl_dst.get()));
                     break;
                 }
             case GGML_TYPE_F16:
@@ -3063,8 +3065,9 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
 
                     // Get workspace size first
                     size_t workspace_size = 0;
-                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmbGetWorkspaceSize, acl_src_trans_tensor.get(), acl_cos_reshape_tensor.get(),
-                                            acl_sin_reshape_tensor.get(), acl_mode, &workspace_size);
+                    aclOpExecutor * executor;
+                    ACL_CHECK(aclnnApplyRotaryPosEmbGetWorkspaceSize(acl_src_trans_tensor.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), nullptr, acl_mode, &workspace_size, &executor));
                     
                     // Allocate workspace if needed
                     void* workspace = nullptr;
@@ -3075,8 +3078,9 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                     }
                     
                     // Execute the operation
-                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmb, acl_src_trans_tensor.get(), acl_cos_reshape_tensor.get(),
-                                            acl_sin_reshape_tensor.get(), acl_mode, workspace, workspace_size, acl_dst_trans_tensor.get());
+                    ACL_CHECK(aclnnApplyRotaryPosEmb(workspace, workspace_size, executor, ctx.stream(),
+                                            acl_src_trans_tensor.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), nullptr, acl_mode, acl_dst_trans_tensor.get()));
 
                     aclnn_cast(ctx, acl_dst_trans_tensor.get(), acl_dst.get(), ACL_FLOAT16);
                     break;
@@ -3635,8 +3639,9 @@ void ggml_cann_flash_attn_ext(ggml_backend_cann_context & ctx, ggml_tensor * dst
             // For Ascend 910A, use aclnnIncreFlashAttention (V1) with proper workspace management
             // Get workspace size first
             size_t workspace_size = 0;
-            GGML_CANN_CALL_ACLNN_OP(ctx, IncreFlashAttentionGetWorkspaceSize, acl_q_tensor.get(), acl_k_tensor.get(),
-                                    acl_v_tensor.get(), scaleValue, &workspace_size);
+            aclOpExecutor * executor;
+            ACL_CHECK(aclnnIncreFlashAttentionGetWorkspaceSize(acl_q_tensor.get(), acl_k_tensor.get(),
+                                    acl_v_tensor.get(), scaleValue, &workspace_size, &executor));
             
             // Allocate workspace if needed
             void* workspace = nullptr;
@@ -3647,8 +3652,9 @@ void ggml_cann_flash_attn_ext(ggml_backend_cann_context & ctx, ggml_tensor * dst
             }
             
             // Execute the operation
-            GGML_CANN_CALL_ACLNN_OP(ctx, IncreFlashAttention, acl_q_tensor.get(), acl_k_tensor.get(),
-                                    acl_v_tensor.get(), scaleValue, workspace, workspace_size, fa_dst_tensor.get());
+            ACL_CHECK(aclnnIncreFlashAttention(workspace, workspace_size, executor, ctx.stream(),
+                                    acl_q_tensor.get(), acl_k_tensor.get(),
+                                    acl_v_tensor.get(), scaleValue, fa_dst_tensor.get()));
         } else {
             // Original code for other devices
             GGML_CANN_CALL_ACLNN_OP(ctx, FusedInferAttentionScoreV2, acl_q_tensor.get(), acl_k_tensor_list.get(),
