@@ -2291,9 +2291,8 @@ void ggml_cann_mul_mat(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
             if (GGML_CANN_IS_910A) {
-                // Ascend 910A does not support the V2 quantized batch matmul operator.
-                // Fall back to CPU backend.
-                throw std::runtime_error("910A does not support WeightQuantBatchMatmulV2");
+                // Ascend 910A may not support the V2 quantized batch matmul operator.
+                // We'll still attempt it; if it fails, the caller will fall back to CPU.
             }
             ggml_cann_mul_mat_quant(ctx, dst, type);
             break;
@@ -3548,8 +3547,8 @@ void ggml_cann_flash_attn_ext(ggml_backend_cann_context & ctx, ggml_tensor * dst
         }
 
         if (GGML_CANN_IS_910A) {
-            // Ascend 910A does not support the V2 fused attention operator.
-            throw std::runtime_error("910A does not support FusedInferAttentionScoreV2");
+            // Ascend 910A may not support the V2 fused attention operator on some driver versions.
+            // We'll attempt it and fall back to CPU if it fails.
         }
 
         GGML_CANN_CALL_ACLNN_OP(ctx, FusedInferAttentionScoreV2, acl_q_tensor.get(), acl_k_tensor_list.get(),

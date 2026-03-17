@@ -2304,10 +2304,9 @@ static void evaluate_and_capture_cann_graph(ggml_backend_cann_context * cann_ctx
     }
     // Only perform the graph execution if CANN graphs are not enabled, or we are capturing the graph.
     // With the use of CANN graphs, the execution will be performed by the graph launch.
-    // Disable graph mode for 910A due to missing ROPE and FLASH_ATTN_EXT support
     if (GGML_CANN_IS_910A) {
-        use_cann_graph           = false;
-        cann_graph_update_required = false;
+        use_cann_graph           = true;
+        cann_graph_update_required = !cann_ctx->static_graph_captured;
     }
 #endif  // USE_ACL_GRAPH
 
