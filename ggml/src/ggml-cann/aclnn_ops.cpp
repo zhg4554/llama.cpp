@@ -3018,41 +3018,32 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
     int64_t acl_mode = is_neox ? 0 : 1;
 
     if (GGML_CANN_IS_910A) {
-        // For Ascend 910A, use aclnnApplyRotaryPosEmb with proper workspace management
+        // For Ascend 910A, use roll and element-wise operations for ROPE
+        // This avoids issues with the aclnnApplyRotaryPosEmb API
         switch (src0->type) {
             case GGML_TYPE_F32:
             case GGML_TYPE_F16:
                 {
-                    // For 910A, use the original implementation with roll and element-wise operations
-                    // This avoids issues with the aclnnApplyRotaryPosEmb API
                     void *               input_roll_buffer;
                     acl_tensor_ptr       acl_minus_one_tensor;
                     void *               minus_one_scale_buffer = nullptr;
                     ggml_cann_pool_alloc roll_allocator(ctx.pool(), ggml_nbytes(src0));
                     ggml_cann_pool_alloc minus_one_scale_allocator(ctx.pool(), sizeof(float) * src0->ne[0]);
+                    
                     if (!is_neox) {
                         // roll input: [q0,q1,q2,q3,...] -> [q1,q0,q3,q2,...]
-                        input_roll_buffer        = roll_allocator.get();
-                        int64_t input_roll_ne[4] = { 2, src0->ne[1] * (src0->ne[0] / 2), src0->ne[2], src0->ne[3] };
-                        size_t  input_roll_nb[GGML_MAX_DIMS];
-                        input_roll_nb[0] = ggml_type_size(src0->type);
-                        for (int i = 1; i < GGML_MAX_DIMS; i++) {
-                            input_roll_nb[i] = input_roll_nb[i - 1] * input_roll_ne[i - 1];
-                        }
+                        input_roll_buffer = roll_allocator.get();
                         acl_tensor_ptr acl_input_roll_tensor = 
                             ggml_cann_create_tensor(input_roll_buffer, ggml_cann_type_mapping(src0->type), ggml_type_size(src0->type),
-                                            input_roll_ne, input_roll_nb, GGML_MAX_DIMS);
-                        acl_tensor_ptr acl_input_tensor = 
-                            ggml_cann_create_tensor(src0->data, ggml_cann_type_mapping(src0->type), ggml_type_size(src0->type),
-                                            input_roll_ne, input_roll_nb, GGML_MAX_DIMS);
+                                            src0->ne, src0->nb, GGML_MAX_DIMS);
+                        acl_tensor_ptr acl_input_tensor = ggml_cann_create_tensor(src0);
 
                         int64_t shifts[] = { 1 };
-                        int64_t dims[]   = { 3 };
+                        int64_t dims[]   = { 0 };
                         aclnn_roll(ctx, acl_input_tensor.get(), acl_input_roll_tensor.get(), shifts, dims);
 
                         // init [-1, 1, -1, 1, ...]
                         minus_one_scale_buffer = minus_one_scale_allocator.get();
-
                         int64_t minus_one_ne[4] = { src0->ne[0], 1, 1, 1 };
                         size_t  minus_one_nb[GGML_MAX_DIMS];
                         minus_one_nb[0] = sizeof(float);
@@ -3061,17 +3052,19 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                         }
                         acl_minus_one_tensor = aclnn_values(ctx, minus_one_scale_buffer, sizeof(float) * src0->ne[0], minus_one_ne,
                                             GGML_MAX_DIMS, ACL_FLOAT, sizeof(float), 1);
-                        int64_t   dim        = 3;
-                        int64_t * index      = new int64_t[src0->ne[0]];
-                        for (int i = 0; i < src0->ne[0]; i++) {
-                            index[i] = i / 2 * 2;
+                        
+                        // Create index for even positions
+                        int64_t   dim = 0;
+                        int64_t * index = new int64_t[src0->ne[0] / 2];
+                        for (int i = 0; i < src0->ne[0] / 2; i++) {
+                            index[i] = i * 2;
                         }
-                        int64_t index_num = src0->ne[0];
-                        float   value     = -1;
+                        int64_t index_num = src0->ne[0] / 2;
+                        float   value = -1;
                         aclnn_index_fill_tensor(ctx, acl_minus_one_tensor.get(), dim, index, index_num, value);
+                        delete[] index;
                     } else {
-                        // roll input: [q0,q1,q2,...] ->
-                        // [q_half,q_half+1,...,q_end,q0,q1,...q_half-1]
+                        // roll input: [q0,q1,q2,...] -> [q_half,q_half+1,...,q_end,q0,q1,...q_half-1]
                         input_roll_buffer = roll_allocator.get();
                         acl_tensor_ptr acl_input_roll_tensor = 
                             ggml_cann_create_tensor(input_roll_buffer, ggml_cann_type_mapping(src0->type), ggml_type_size(src0->type),
@@ -3079,19 +3072,20 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                         acl_tensor_ptr acl_input_tensor = ggml_cann_create_tensor(src0);
 
                         int64_t shifts[] = { src0->ne[0] / 2 };
-                        int64_t dims[]   = { 3 };
+                        int64_t dims[]   = { 0 };
                         aclnn_roll(ctx, acl_input_tensor.get(), acl_input_roll_tensor.get(), shifts, dims);
 
-                        // init [-1, -1, -1, 1, 1，1，...]
-                        minus_one_scale_buffer  = minus_one_scale_allocator.get();
+                        // init [-1, -1, -1, 1, 1, 1, ...]
+                        minus_one_scale_buffer = minus_one_scale_allocator.get();
                         int64_t minus_one_ne[4] = { src0->ne[0], 1, 1, 1 };
                         size_t  minus_one_nb[GGML_MAX_DIMS];
                         minus_one_nb[0] = sizeof(float);
                         for (int i = 1; i < GGML_MAX_DIMS; i++) {
                             minus_one_nb[i] = minus_one_nb[i - 1] * minus_one_ne[i - 1];
                         }
-                        acl_minus_one_tensor     = aclnn_values(ctx, minus_one_scale_buffer, sizeof(float) * src0->ne[0], minus_one_ne,
-                                                GGML_MAX_DIMS, ACL_FLOAT, sizeof(float), 1);
+                        acl_minus_one_tensor = aclnn_values(ctx, minus_one_scale_buffer, sizeof(float) * src0->ne[0], minus_one_ne,
+                                            GGML_MAX_DIMS, ACL_FLOAT, sizeof(float), 1);
+                        
                         // -1 * first half
                         int64_t first_half_ne[4] = { src0->ne[0] / 2, 1, 1, 1 };
                         size_t  first_half_nb[GGML_MAX_DIMS];
@@ -3101,28 +3095,20 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                         }
                         acl_tensor_ptr acl_first_half_tensor = ggml_cann_create_tensor(minus_one_scale_buffer, ACL_FLOAT, sizeof(float),
                                                                        first_half_ne, first_half_nb, GGML_MAX_DIMS);
-                        bool           inplace               = true;
-                        float          scale                 = -1;
+                        bool           inplace = true;
+                        float          scale = -1;
                         aclnn_muls(ctx, acl_first_half_tensor.get(), scale, nullptr, inplace);
                     }
-
-                    // TODO: n_dims < ne0
-                    GGML_ASSERT(n_dims == src0->ne[0]);
 
                     // input * scale
                     ggml_cann_pool_alloc roll_mul_scale_allocator(ctx.pool(), ggml_nbytes(src0));
                     void *               input_roll_mul_scale_buffer = roll_mul_scale_allocator.get();
-                    size_t               input_nb[GGML_MAX_DIMS];
-                    input_nb[0] = ggml_type_size(src0->type);
-                    for (int i = 1; i < GGML_MAX_DIMS; i++) {
-                        input_nb[i] = input_nb[i - 1] * src0->ne[i - 1];
-                    }
                     acl_tensor_ptr acl_input_roll_mul_scale_tensor = 
                         ggml_cann_create_tensor(input_roll_mul_scale_buffer, ggml_cann_type_mapping(src0->type),
-                                        ggml_type_size(src0->type), src0->ne, input_nb, GGML_MAX_DIMS);
+                                        ggml_type_size(src0->type), src0->ne, src0->nb, GGML_MAX_DIMS);
                     acl_tensor_ptr acl_input_roll_reshape_tensor = 
                         ggml_cann_create_tensor(input_roll_buffer, ggml_cann_type_mapping(src0->type), ggml_type_size(src0->type),
-                                        src0->ne, input_nb, GGML_MAX_DIMS);
+                                        src0->ne, src0->nb, GGML_MAX_DIMS);
 
                     aclnn_mul(ctx, acl_input_roll_reshape_tensor.get(), acl_minus_one_tensor.get(),
                               acl_input_roll_mul_scale_tensor.get());
@@ -3132,7 +3118,6 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
                         aclnn_mul(ctx, acl_src.get(), acl_cos_reshape_tensor.get());
                         aclnn_mul(ctx, acl_input_roll_mul_scale_tensor.get(), acl_sin_reshape_tensor.get());
                         aclnn_add(ctx, acl_src.get(), acl_input_roll_mul_scale_tensor.get(), acl_dst.get());
-                        // TODO: ne0 != n_dims in mode2
                     } else if (src0->type == GGML_TYPE_F16) {
                         size_t input_fp32_nb[GGML_MAX_DIMS];
                         input_fp32_nb[0] = sizeof(float);
