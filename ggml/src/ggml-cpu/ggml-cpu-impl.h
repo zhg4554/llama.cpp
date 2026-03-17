@@ -291,6 +291,57 @@ inline static uint8x16_t ggml_vqtbl1q_u8(uint8x16_t a, uint8x16_t b) {
 #define ggml_int8x16x2_t  int8x16x2_t
 #define ggml_int8x16x4_t  int8x16x4_t
 
+// Some toolchains (especially older ARM/LLVM versions) may not provide the
+// "x2"/"x4" NEON intrinsics. Provide portable fallbacks when missing.
+#ifndef vld1q_s16_x2
+static inline int16x8x2_t vld1q_s16_x2(const int16_t *ptr) {
+    int16x8x2_t r;
+    r.val[0] = vld1q_s16(ptr);
+    r.val[1] = vld1q_s16(ptr + 8);
+    return r;
+}
+#endif
+
+#ifndef vld1q_u8_x2
+static inline uint8x16x2_t vld1q_u8_x2(const uint8_t *ptr) {
+    uint8x16x2_t r;
+    r.val[0] = vld1q_u8(ptr);
+    r.val[1] = vld1q_u8(ptr + 16);
+    return r;
+}
+#endif
+
+#ifndef vld1q_u8_x4
+static inline uint8x16x4_t vld1q_u8_x4(const uint8_t *ptr) {
+    uint8x16x4_t r;
+    r.val[0] = vld1q_u8(ptr);
+    r.val[1] = vld1q_u8(ptr + 16);
+    r.val[2] = vld1q_u8(ptr + 32);
+    r.val[3] = vld1q_u8(ptr + 48);
+    return r;
+}
+#endif
+
+#ifndef vld1q_s8_x2
+static inline int8x16x2_t vld1q_s8_x2(const int8_t *ptr) {
+    int8x16x2_t r;
+    r.val[0] = vld1q_s8(ptr);
+    r.val[1] = vld1q_s8(ptr + 16);
+    return r;
+}
+#endif
+
+#ifndef vld1q_s8_x4
+static inline int8x16x4_t vld1q_s8_x4(const int8_t *ptr) {
+    int8x16x4_t r;
+    r.val[0] = vld1q_s8(ptr);
+    r.val[1] = vld1q_s8(ptr + 16);
+    r.val[2] = vld1q_s8(ptr + 32);
+    r.val[3] = vld1q_s8(ptr + 48);
+    return r;
+}
+#endif
+
 #define ggml_vld1q_s16_x2 vld1q_s16_x2
 #define ggml_vld1q_u8_x2  vld1q_u8_x2
 #define ggml_vld1q_u8_x4  vld1q_u8_x4
