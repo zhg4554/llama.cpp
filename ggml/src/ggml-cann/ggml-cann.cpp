@@ -2408,15 +2408,20 @@ static enum ggml_status ggml_backend_cann_graph_compute(ggml_backend_t backend, 
 
     static bool prefill_use_graph = parse_bool(get_env("GGML_CANN_PREFILL_USE_GRAPH").value_or(""));
     if (!prefill_use_graph) {
-        // Do not use acl_graph for prefill.
-        for (int i = 0; i < cgraph->n_nodes; i++) {
-            ggml_tensor * node = cgraph->nodes[i];
-            // TODO: Optimize here. Currently, we can only
-            // get seq_len by FA's input.
-            if (node->op == GGML_OP_FLASH_ATTN_EXT) {
-                // Q -> src[0], shape: [B, S, N, D]
-                use_cann_graph = (node->src[0]->ne[1] == 1);
-                break;
+        if (GGML_CANN_IS_910A) {
+            // On 910A, always use graph mode (static graph) for better performance
+            use_cann_graph = true;
+        } else {
+            // Do not use acl_graph for prefill.
+            for (int i = 0; i < cgraph->n_nodes; i++) {
+                ggml_tensor * node = cgraph->nodes[i];
+                // TODO: Optimize here. Currently, we can only
+                // get seq_len by FA's input.
+                if (node->op == GGML_OP_FLASH_ATTN_EXT) {
+                    // Q -> src[0], shape: [B, S, N, D]
+                    use_cann_graph = (node->src[0]->ne[1] == 1);
+                    break;
+                }
             }
         }
     }
@@ -2506,14 +2511,11 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
                         return true;
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_Q4_0:
-                        if (GGML_CANN_IS_910A) {
-                            // Ascend 910A has limited support for quantized matrix multiplication
-                            return false;
-                        }
 #ifdef ASCEND_310P
                         // Q4 && Q8 per group is not support on 310p device
                         return false;
 #endif
+                        // For 910A, try quantized matrix multiplication with WeightQuantBatchMatmulV2
                         // only support contiguous for quantized types.
                         return ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
                     default:
