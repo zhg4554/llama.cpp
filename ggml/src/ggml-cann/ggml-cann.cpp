@@ -2339,29 +2339,29 @@ static void evaluate_and_capture_cann_graph(ggml_backend_cann_context * cann_ctx
     }
 #endif  // USE_ACL_GRAPH
 
-    if (!use_cann_graph || cann_graph_update_required) {
-        for (int i = 0; i < cgraph->n_nodes; i++) {
-            ggml_tensor * node = cgraph->nodes[i];
+    // Always execute the graph nodes, even when using graph mode
+    // This ensures that computations are actually performed on the NPU
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
 
-            if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE ||
-                node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
-                continue;
-            }
+        if (ggml_is_empty(node) || node->op == GGML_OP_RESHAPE || node->op == GGML_OP_TRANSPOSE ||
+            node->op == GGML_OP_VIEW || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_NONE) {
+            continue;
+        }
 
-            bool ok = ggml_cann_compute_forward(*cann_ctx, node);
-            if (!ok) {
-                // Try a best-effort fallback for matrix multiplications (e.g., MUL_MAT) before
-                // falling back to the CPU backend.
-                if (node->op == GGML_OP_MUL_MAT) {
-                    if (ggml_cann_try_matmul_fallback(*cann_ctx, node)) {
-                        continue;
-                    }
+        bool ok = ggml_cann_compute_forward(*cann_ctx, node);
+        if (!ok) {
+            // Try a best-effort fallback for matrix multiplications (e.g., MUL_MAT) before
+            // falling back to the CPU backend.
+            if (node->op == GGML_OP_MUL_MAT) {
+                if (ggml_cann_try_matmul_fallback(*cann_ctx, node)) {
+                    continue;
                 }
-
-                GGML_LOG_DEBUG("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
-                // Allow fallback to CPU backend instead of aborting.
-                continue;
             }
+
+            GGML_LOG_DEBUG("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
+            // Allow fallback to CPU backend instead of aborting.
+            continue;
         }
     }
 
