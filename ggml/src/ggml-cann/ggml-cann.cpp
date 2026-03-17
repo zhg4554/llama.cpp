@@ -301,27 +301,32 @@ struct ggml_cann_pool_buf_prio : public ggml_cann_pool {
         }
 
         // On 910A, use a single pre-allocated workspace to avoid driver errors caused by
-        // repeated allocations and varying shape/size between invocations.
-        if (GGML_CANN_IS_910A) {
-            static void *  s_static_workspace = nullptr;
-            static size_t s_static_workspace_size = 0;
-            static std::mutex s_static_workspace_mutex;
+            // repeated allocations and varying shape/size between invocations.
+            if (GGML_CANN_IS_910A) {
+                // Use device-specific static workspace to avoid conflicts between devices
+                static std::unordered_map<int, void *> s_static_workspaces;
+                static std::unordered_map<int, size_t> s_static_workspace_sizes;
+                static std::mutex s_static_workspace_mutex;
 
-            std::lock_guard<std::mutex> lock(s_static_workspace_mutex);
-            size_t min_size = parse_integer(get_env("GGML_CANN_STATIC_WORKSPACE_SIZE").value_or("268435456")); // 256MB
-            size_t needed = std::max(size, min_size);
-            if (s_static_workspace_size < needed) {
-                if (s_static_workspace != nullptr) {
+                std::lock_guard<std::mutex> lock(s_static_workspace_mutex);
+                size_t min_size = parse_integer(get_env("GGML_CANN_STATIC_WORKSPACE_SIZE").value_or("268435456")); // 256MB
+                size_t needed = std::max(size, min_size);
+                
+                // Check if workspace exists for this device and if it's large enough
+                if (s_static_workspace_sizes[device] < needed) {
+                    // Free existing workspace if it's too small
+                    if (s_static_workspaces[device] != nullptr) {
+                        ggml_cann_set_device(device);
+                        ACL_CHECK(aclrtFree(s_static_workspaces[device]));
+                    }
+                    // Allocate new workspace with increased size
                     ggml_cann_set_device(device);
-                    ACL_CHECK(aclrtFree(s_static_workspace));
+                    ACL_CHECK(aclrtMalloc(&s_static_workspaces[device], needed, ACL_MEM_MALLOC_HUGE_FIRST));
+                    s_static_workspace_sizes[device] = needed;
                 }
-                ggml_cann_set_device(device);
-                ACL_CHECK(aclrtMalloc(&s_static_workspace, needed, ACL_MEM_MALLOC_HUGE_FIRST));
-                s_static_workspace_size = needed;
+                *actual_size = s_static_workspace_sizes[device];
+                return s_static_workspaces[device];
             }
-            *actual_size = s_static_workspace_size;
-            return s_static_workspace;
-        }
 
         void * ptr = nullptr;
         auto   now = std::chrono::steady_clock::now();
@@ -2495,16 +2500,16 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
             break;
         case GGML_OP_MUL_MAT:
             {
-                // Ascend 910A has limited support for matrix multiplication operations
-                if (GGML_CANN_IS_910A) {
-                    return false;
-                }
                 switch (op->src[0]->type) {
                     case GGML_TYPE_F16:
                     case GGML_TYPE_F32:
                         return true;
                     case GGML_TYPE_Q8_0:
                     case GGML_TYPE_Q4_0:
+                        if (GGML_CANN_IS_910A) {
+                            // Ascend 910A has limited support for quantized matrix multiplication
+                            return false;
+                        }
 #ifdef ASCEND_310P
                         // Q4 && Q8 per group is not support on 310p device
                         return false;
@@ -2579,10 +2584,6 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
             }
         case GGML_OP_ROPE:
             {
-                // Ascend 910A does not support ROPE operation
-                if (GGML_CANN_IS_910A) {
-                    return false;
-                }
                 // TODO: with ops-test v == 1
                 // TODO: n_dims <= ne0
                 if (op->src[0]->ne[0] != op->op_params[1]) {
@@ -2697,10 +2698,6 @@ static bool ggml_backend_cann_supports_op(ggml_backend_dev_t dev, const ggml_ten
                 // FA not support on 310p device
                 return false;
 #endif
-                // Ascend 910A does not support FLASH_ATTN_EXT operation
-                if (GGML_CANN_IS_910A) {
-                    return false;
-                }
                 // derived from [ggml-cuda.cu]
                 if (op->src[1]->type != GGML_TYPE_F16 || op->src[2]->type != GGML_TYPE_F16) {
                     return false;
