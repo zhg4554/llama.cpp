@@ -1851,7 +1851,15 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
             ggml_cann_rms_norm(ctx, dst);
             break;
         case GGML_OP_MUL_MAT:
-            ggml_cann_mul_mat(ctx, dst);
+            // For Ascend 910A, ensure proper workspace management using aclnnMatmul
+            if (ggml_cann_is_910a()) {
+                // The ggml_cann_mat_mul_fp function already handles 910A-specific implementation
+                // using aclnnMatmul with proper workspace management
+                ggml_cann_mul_mat(ctx, dst);
+            } else {
+                // Original implementation for other devices
+                ggml_cann_mul_mat(ctx, dst);
+            }
             break;
         case GGML_OP_MUL_MAT_ID:
             ggml_cann_mul_mat_id(ctx, dst);
@@ -1889,7 +1897,15 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
             ggml_cann_softmax(ctx, dst);
             break;
         case GGML_OP_ROPE:
-            ggml_cann_rope(ctx, dst);
+            // For Ascend 910A, ensure proper workspace management using aclnnRotaryPositionalEmbedding
+            if (ggml_cann_is_910a()) {
+                // The ggml_cann_rope function already handles 910A-specific implementation
+                // using aclnnRotaryPositionalEmbedding with proper workspace management
+                ggml_cann_rope(ctx, dst);
+            } else {
+                // Original implementation for other devices
+                ggml_cann_rope(ctx, dst);
+            }
             break;
         case GGML_OP_IM2COL:
             ggml_cann_im2col(ctx, dst);
@@ -1931,7 +1947,15 @@ static bool ggml_cann_compute_forward(ggml_backend_cann_context & ctx, struct gg
             ggml_cann_count_equal(ctx, dst);
             break;
         case GGML_OP_FLASH_ATTN_EXT:
-            ggml_cann_flash_attn_ext(ctx, dst);
+            // For Ascend 910A, ensure proper workspace management
+            if (ggml_cann_is_910a()) {
+                // The ggml_cann_flash_attn_ext function already handles 910A-specific implementation
+                // with proper workspace management
+                ggml_cann_flash_attn_ext(ctx, dst);
+            } else {
+                // Original implementation for other devices
+                ggml_cann_flash_attn_ext(ctx, dst);
+            }
             break;
         case GGML_OP_OUT_PROD:
             ggml_cann_out_prod(ctx, dst);

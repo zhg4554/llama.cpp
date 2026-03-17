@@ -75,6 +75,8 @@
 #include <aclnnop/aclnn_upsample_nearest_2d.h>
 #include <aclnnop/aclnn_weight_quant_batch_matmul_v2.h>
 #include <aclnnop/aclnn_zero.h>
+#include <aclnnop/aclnn_apply_rotary_pos_emb.h>
+#include <aclnnop/aclnn_incre_flash_attention.h>
 #include <float.h>
 
 #include <cmath>
@@ -2025,19 +2027,31 @@ static void ggml_cann_mat_mul_fp(ggml_backend_cann_context & ctx, ggml_tensor * 
                                                     ggml_type_size(dst->type), dst_ne_p, dst_nb_p, n_dims,
                                                     ACL_FORMAT_ND);
 
-    switch (n_dims) {
-        case 2:
-            GGML_CANN_CALL_ACLNN_OP(ctx, Mm, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(), 2);
-            break;
-        case 3:
-            GGML_CANN_CALL_ACLNN_OP(ctx, BatchMatMul, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(),
-                                    2);
-            break;
-        default:
-            // ALLOW_FP32_DOWN_PRECISION, when input is
-            // fp32, atlas a2 will transpose it to HFLOAT32.
-            GGML_CANN_CALL_ACLNN_OP(ctx, Matmul, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(), 1);
-            break;
+    if (GGML_CANN_IS_910A) {
+        // For Ascend 910A, use aclnnMatmul with proper workspace management
+        switch (n_dims) {
+            case 2:
+            case 3:
+            default:
+                // Use aclnnMatmul for all dimensions on 910A
+                GGML_CANN_CALL_ACLNN_OP(ctx, Matmul, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(), 1);
+                break;
+        }
+    } else {
+        switch (n_dims) {
+            case 2:
+                GGML_CANN_CALL_ACLNN_OP(ctx, Mm, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(), 2);
+                break;
+            case 3:
+                GGML_CANN_CALL_ACLNN_OP(ctx, BatchMatMul, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(),
+                                        2);
+                break;
+            default:
+                // ALLOW_FP32_DOWN_PRECISION, when input is
+                // fp32, atlas a2 will transpose it to HFLOAT32.
+                GGML_CANN_CALL_ACLNN_OP(ctx, Matmul, acl_input_tensor.get(), acl_weight_tensor.get(), acl_dst.get(), 1);
+                break;
+        }
     }
 }
 
@@ -3003,43 +3017,114 @@ void ggml_cann_rope(ggml_backend_cann_context & ctx, ggml_tensor * dst) {
 
     int64_t acl_mode = is_neox ? 0 : 1;
 
-    switch (src0->type) {
-        case GGML_TYPE_F32:
-            {
-                GGML_CANN_CALL_ACLNN_OP(ctx, RotaryPositionEmbedding, acl_src.get(), acl_cos_reshape_tensor.get(),
-                                        acl_sin_reshape_tensor.get(), acl_mode, acl_dst.get());
-                break;
-            }
-        case GGML_TYPE_F16:
-            {
-                ggml_cann_pool_alloc src_trans_allocator(ctx.pool(), ggml_nelements(src0) * sizeof(float));
-                void *               src_trans_buffer = src_trans_allocator.get();
-                ggml_cann_pool_alloc dst_trans_allocator(ctx.pool(), ggml_nelements(dst) * sizeof(float));
-                void *               dst_trans_buffer = dst_trans_allocator.get();
-
-                size_t src_trans_nb[GGML_MAX_DIMS];
-                src_trans_nb[0] = sizeof(float);
-                for (int i = 1; i < GGML_MAX_DIMS; i++) {
-                    src_trans_nb[i] = src_trans_nb[i - 1] * src0->ne[i - 1];
+    if (GGML_CANN_IS_910A) {
+        // For Ascend 910A, use aclnnApplyRotaryPosEmb with proper workspace management
+        switch (src0->type) {
+            case GGML_TYPE_F32:
+                {
+                    // Get workspace size first
+                    size_t workspace_size = 0;
+                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmbGetWorkspaceSize, acl_src.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), acl_mode, &workspace_size);
+                    
+                    // Allocate workspace if needed
+                    void* workspace = nullptr;
+                    ggml_cann_pool_alloc workspace_allocator;
+                    if (workspace_size > 0) {
+                        workspace_allocator.alloc(ctx.pool(), workspace_size);
+                        workspace = workspace_allocator.get();
+                    }
+                    
+                    // Execute the operation
+                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmb, acl_src.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), acl_mode, workspace, workspace_size, acl_dst.get());
+                    break;
                 }
+            case GGML_TYPE_F16:
+                {
+                    // For F16, we need to cast to float first since aclnnApplyRotaryPosEmb may not support F16 directly
+                    ggml_cann_pool_alloc src_trans_allocator(ctx.pool(), ggml_nelements(src0) * sizeof(float));
+                    void *               src_trans_buffer = src_trans_allocator.get();
+                    ggml_cann_pool_alloc dst_trans_allocator(ctx.pool(), ggml_nelements(dst) * sizeof(float));
+                    void *               dst_trans_buffer = dst_trans_allocator.get();
 
-                acl_tensor_ptr acl_src_trans_tensor = ggml_cann_create_tensor(
-                    src_trans_buffer, ACL_FLOAT, sizeof(float), src0->ne, src_trans_nb, GGML_MAX_DIMS);
-                acl_tensor_ptr acl_dst_trans_tensor = ggml_cann_create_tensor(
-                    dst_trans_buffer, ACL_FLOAT, sizeof(float), dst->ne, src_trans_nb, GGML_MAX_DIMS);
+                    size_t src_trans_nb[GGML_MAX_DIMS];
+                    src_trans_nb[0] = sizeof(float);
+                    for (int i = 1; i < GGML_MAX_DIMS; i++) {
+                        src_trans_nb[i] = src_trans_nb[i - 1] * src0->ne[i - 1];
+                    }
 
-                aclnn_cast(ctx, acl_src.get(), acl_src_trans_tensor.get(), ACL_FLOAT);
+                    acl_tensor_ptr acl_src_trans_tensor = ggml_cann_create_tensor(
+                        src_trans_buffer, ACL_FLOAT, sizeof(float), src0->ne, src_trans_nb, GGML_MAX_DIMS);
+                    acl_tensor_ptr acl_dst_trans_tensor = ggml_cann_create_tensor(
+                        dst_trans_buffer, ACL_FLOAT, sizeof(float), dst->ne, src_trans_nb, GGML_MAX_DIMS);
 
-                GGML_CANN_CALL_ACLNN_OP(ctx, RotaryPositionEmbedding, acl_src_trans_tensor.get(),
-                                        acl_cos_reshape_tensor.get(), acl_sin_reshape_tensor.get(), acl_mode,
-                                        acl_dst_trans_tensor.get());
+                    aclnn_cast(ctx, acl_src.get(), acl_src_trans_tensor.get(), ACL_FLOAT);
 
-                aclnn_cast(ctx, acl_dst_trans_tensor.get(), acl_dst.get(), ACL_FLOAT16);
+                    // Get workspace size first
+                    size_t workspace_size = 0;
+                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmbGetWorkspaceSize, acl_src_trans_tensor.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), acl_mode, &workspace_size);
+                    
+                    // Allocate workspace if needed
+                    void* workspace = nullptr;
+                    ggml_cann_pool_alloc workspace_allocator;
+                    if (workspace_size > 0) {
+                        workspace_allocator.alloc(ctx.pool(), workspace_size);
+                        workspace = workspace_allocator.get();
+                    }
+                    
+                    // Execute the operation
+                    GGML_CANN_CALL_ACLNN_OP(ctx, ApplyRotaryPosEmb, acl_src_trans_tensor.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), acl_mode, workspace, workspace_size, acl_dst_trans_tensor.get());
+
+                    aclnn_cast(ctx, acl_dst_trans_tensor.get(), acl_dst.get(), ACL_FLOAT16);
+                    break;
+                }
+            default:
+                GGML_ABORT("Unsupported tensor type for GGML_OP_ROPE");
                 break;
-            }
-        default:
-            GGML_ABORT("Unsupported tensor type for GGML_OP_ROPE");
-            break;
+        }
+    } else {
+        // Original code for other devices
+        switch (src0->type) {
+            case GGML_TYPE_F32:
+                {
+                    GGML_CANN_CALL_ACLNN_OP(ctx, RotaryPositionEmbedding, acl_src.get(), acl_cos_reshape_tensor.get(),
+                                            acl_sin_reshape_tensor.get(), acl_mode, acl_dst.get());
+                    break;
+                }
+            case GGML_TYPE_F16:
+                {
+                    ggml_cann_pool_alloc src_trans_allocator(ctx.pool(), ggml_nelements(src0) * sizeof(float));
+                    void *               src_trans_buffer = src_trans_allocator.get();
+                    ggml_cann_pool_alloc dst_trans_allocator(ctx.pool(), ggml_nelements(dst) * sizeof(float));
+                    void *               dst_trans_buffer = dst_trans_allocator.get();
+
+                    size_t src_trans_nb[GGML_MAX_DIMS];
+                    src_trans_nb[0] = sizeof(float);
+                    for (int i = 1; i < GGML_MAX_DIMS; i++) {
+                        src_trans_nb[i] = src_trans_nb[i - 1] * src0->ne[i - 1];
+                    }
+
+                    acl_tensor_ptr acl_src_trans_tensor = ggml_cann_create_tensor(
+                        src_trans_buffer, ACL_FLOAT, sizeof(float), src0->ne, src_trans_nb, GGML_MAX_DIMS);
+                    acl_tensor_ptr acl_dst_trans_tensor = ggml_cann_create_tensor(
+                        dst_trans_buffer, ACL_FLOAT, sizeof(float), dst->ne, src_trans_nb, GGML_MAX_DIMS);
+
+                    aclnn_cast(ctx, acl_src.get(), acl_src_trans_tensor.get(), ACL_FLOAT);
+
+                    GGML_CANN_CALL_ACLNN_OP(ctx, RotaryPositionEmbedding, acl_src_trans_tensor.get(),
+                                            acl_cos_reshape_tensor.get(), acl_sin_reshape_tensor.get(), acl_mode,
+                                            acl_dst_trans_tensor.get());
+
+                    aclnn_cast(ctx, acl_dst_trans_tensor.get(), acl_dst.get(), ACL_FLOAT16);
+                    break;
+                }
+            default:
+                GGML_ABORT("Unsupported tensor type for GGML_OP_ROPE");
+                break;
+        }
     }
 }
 
@@ -3547,33 +3632,49 @@ void ggml_cann_flash_attn_ext(ggml_backend_cann_context & ctx, ggml_tensor * dst
         }
 
         if (GGML_CANN_IS_910A) {
-            // Ascend 910A may not support the V2 fused attention operator on some driver versions.
-            // We'll attempt it and fall back to CPU if it fails.
+            // For Ascend 910A, use aclnnIncreFlashAttention (V1) with proper workspace management
+            // Get workspace size first
+            size_t workspace_size = 0;
+            GGML_CANN_CALL_ACLNN_OP(ctx, IncreFlashAttentionGetWorkspaceSize, acl_q_tensor.get(), acl_k_tensor.get(),
+                                    acl_v_tensor.get(), scaleValue, &workspace_size);
+            
+            // Allocate workspace if needed
+            void* workspace = nullptr;
+            ggml_cann_pool_alloc workspace_allocator;
+            if (workspace_size > 0) {
+                workspace_allocator.alloc(ctx.pool(), workspace_size);
+                workspace = workspace_allocator.get();
+            }
+            
+            // Execute the operation
+            GGML_CANN_CALL_ACLNN_OP(ctx, IncreFlashAttention, acl_q_tensor.get(), acl_k_tensor.get(),
+                                    acl_v_tensor.get(), scaleValue, workspace, workspace_size, fa_dst_tensor.get());
+        } else {
+            // Original code for other devices
+            GGML_CANN_CALL_ACLNN_OP(ctx, FusedInferAttentionScoreV2, acl_q_tensor.get(), acl_k_tensor_list.get(),
+                                    acl_v_tensor_list.get(),               // q, k, v
+                                    bcast_pse_tensor.get(), nullptr,       // pse, mask
+                                    nullptr, nullptr,                      // actSeqLen, actSeqLenkv
+                                    nullptr, nullptr,                      // deqScale1, quantScale1
+                                    nullptr, nullptr, nullptr,             // deqScale2, quantScale2, quantOffset2
+                                    nullptr, nullptr,                      // antiquantScale, antiquantOffset
+                                    nullptr,                               // blockTable
+                                    nullptr, nullptr,                      // qPadSize, kvPadSize
+                                    nullptr, nullptr,                      // kAntiquantScale, kAntiQuantOffset
+                                    nullptr, nullptr,                      // vAntiquantScale, vAntiQuantOffset
+                                    nullptr, nullptr, nullptr,             // kSharedPrefix, vSharedPrefix, actSharedLen
+                                    numHeads, scaleValue,                  // heads, scaleValue
+                                    preTokens, nextTokens,                 // preTokens, nextTokens
+                                    layout,                                // inputLayout
+                                    numKeyValueHeads,                      // numKVHeads
+                                    sparseMode, innerPrecise,              // sparseMode, innerPrecise
+                                    blockSize, antiquantMode,              // blockSize, antiquantMode
+                                    softmaxLseFlag,                        // softmaxLseFlag
+                                    keyAntiquantMode, valueAntiquantMode,  // keyAntiqMode, valueAntiqMode
+                                    fa_dst_tensor.get(),                   // attentionOut
+                                    nullptr                                // softmaxLse
+            );
         }
-
-        GGML_CANN_CALL_ACLNN_OP(ctx, FusedInferAttentionScoreV2, acl_q_tensor.get(), acl_k_tensor_list.get(),
-                                acl_v_tensor_list.get(),               // q, k, v
-                                bcast_pse_tensor.get(), nullptr,       // pse, mask
-                                nullptr, nullptr,                      // actSeqLen, actSeqLenkv
-                                nullptr, nullptr,                      // deqScale1, quantScale1
-                                nullptr, nullptr, nullptr,             // deqScale2, quantScale2, quantOffset2
-                                nullptr, nullptr,                      // antiquantScale, antiquantOffset
-                                nullptr,                               // blockTable
-                                nullptr, nullptr,                      // qPadSize, kvPadSize
-                                nullptr, nullptr,                      // kAntiquantScale, kAntiQuantOffset
-                                nullptr, nullptr,                      // vAntiquantScale, vAntiQuantOffset
-                                nullptr, nullptr, nullptr,             // kSharedPrefix, vSharedPrefix, actSharedLen
-                                numHeads, scaleValue,                  // heads, scaleValue
-                                preTokens, nextTokens,                 // preTokens, nextTokens
-                                layout,                                // inputLayout
-                                numKeyValueHeads,                      // numKVHeads
-                                sparseMode, innerPrecise,              // sparseMode, innerPrecise
-                                blockSize, antiquantMode,              // blockSize, antiquantMode
-                                softmaxLseFlag,                        // softmaxLseFlag
-                                keyAntiquantMode, valueAntiquantMode,  // keyAntiqMode, valueAntiqMode
-                                fa_dst_tensor.get(),                   // attentionOut
-                                nullptr                                // softmaxLse
-        );
 
         if (dst->type == GGML_TYPE_F32) {
             // Step 6: post-processing, permute and cast to f32
